@@ -20,11 +20,17 @@ know.
 Try in this order, stop at the first that works:
 
 1. **On `PATH`** — `deepseek-web --version`
-2. **From the repo** — this file lives at `skills/deepseek-web/SKILL.md`, so the repo root is the
-   directory **two levels up**. From there, `python3 -m deepseek_web --version` works with no
-   install and no `PYTHONPATH`.
-3. **Repo missing** — verify before trusting: the repo root must contain `deepseek_web/__init__.py`.
-   If it does not, this skill was copied out without the code. Clone the repo, then use step 2.
+2. **From the repo checkout** — `python3 -m deepseek_web --version`, run from the repo root. Find
+   that root by trying, in order:
+   - `$DEEPSEEK_WEB_HOME`, if set
+   - the directory **two levels above this file** (correct when you are reading this inside the
+     repo, at `skills/deepseek-web/SKILL.md`)
+   - a `deepseek-web` directory beside the directory holding this skill (correct for an installed
+     copy)
+
+   Before trusting a candidate, confirm it contains `deepseek_web/__init__.py`. A directory that
+   lacks it is not the repo.
+3. **Repo missing** — clone it, then use step 2.
 
 Below, `deepseek-web` means whichever form worked. Everything else is identical.
 
