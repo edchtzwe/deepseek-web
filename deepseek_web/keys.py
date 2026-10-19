@@ -1,0 +1,344 @@
+"""Credential discovery.
+
+The goal is zero manual setup: the tool looks for a key in every place a
+containerised agent realistically already has one, in a fixed order, and
+reports which source won.
+
+Resolution order (first non-empty wins):
+
+1. explicit argument (library callers only)
+2. ``DEEPSEEK_API_KEY`` environment variable
+3. ``--env-file`` path, or ``DEEPSEEK_API_KEY_FILE`` (file containing the key)
+4. ``DEEPSEEK_API_KEY_CMD`` - shell command whose stdout is the key
+   (``pass show deepseek``, ``op read op://...``, ``docker exec ...``)
+5. ``.env`` files discovered walking up from the working directory, then
+   ``~/.config/deepseek-web/.env`` and ``~/.deepseek-web.env``
+6. well-known secret mounts (``/run/secrets/...``)
+
+Empty values are treated as missing, which matters because compose files
+commonly declare ``DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}`` - an unset
+host variable arrives as an empty string, not as "absent".
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import stat
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+from .errors import ConfigError
+
+ENV_VAR = "DEEPSEEK_API_KEY"
+KEY_FILE_ENV = "DEEPSEEK_API_KEY_FILE"
+KEY_CMD_ENV = "DEEPSEEK_API_KEY_CMD"
+ENV_FILE_VAR = "DEEPSEEK_WEB_ENV_FILE"
+DEFAULT_ENV_FILENAME = ".env"
+
+SECRET_PATHS: Tuple[str, ...] = (
+    "/run/secrets/deepseek_api_key",
+    "/run/secrets/DEEPSEEK_API_KEY",
+    "/run/secrets/deepseek-web",
+)
+
+MAX_PARENT_WALK = 8
+CMD_TIMEOUT = 15.0
+
+_ASSIGNMENT = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+
+
+# -- resolution ----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class KeyResolution:
+    """Where the key came from. Never carries the raw key into a log."""
+
+    key: str
+    source: str
+    origin: str
+
+    @property
+    def masked(self) -> str:
+        return f"****{self.key[-4:]}" if len(self.key) >= 8 else "****"
+
+    def describe(self) -> Dict[str, object]:
+        return {"source": self.source, "origin": self.origin, "masked": self.masked}
+
+
+def candidate_env_files(cwd: Optional[Path] = None) -> List[Path]:
+    """Every ``.env`` path worth reading, in priority order, deduplicated."""
+    paths: List[Path] = []
+
+    explicit = os.getenv(ENV_FILE_VAR)
+    if explicit:
+        paths.append(Path(explicit).expanduser())
+
+    start = (cwd or Path.cwd()).resolve()
+    for directory in [start, *list(start.parents)[:MAX_PARENT_WALK]]:
+        paths.append(directory / DEFAULT_ENV_FILENAME)
+
+    home = Path.home()
+    paths.extend(
+        [
+            home / ".config" / "deepseek-web" / DEFAULT_ENV_FILENAME,
+            home / f"{DEFAULT_ENV_FILENAME}",
+        ]
+    )
+
+    seen: set = set()
+    unique: List[Path] = []
+    for path in paths:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def parse_dotenv(text: str) -> Dict[str, str]:
+    """Parse a minimal ``KEY=VALUE`` file. No interpolation, no surprises."""
+    values: Dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _ASSIGNMENT.match(line)
+        if not match:
+            continue
+        name, value = match.group(1), match.group(2).strip()
+        quote = value[:1] if value[:1] in ("'", '"') else ""
+        if quote and len(value) >= 2 and value[-1] == quote:
+            value = value[1:-1]
+            if quote == '"':
+                value = value.replace('\\"', '"')
+        else:
+            value = _strip_inline_comment(value)
+        values[name] = value
+    return values
+
+
+def _strip_inline_comment(value: str) -> str:
+    if " #" in value:
+        return value.split(" #", 1)[0].rstrip()
+    if "\t#" in value:
+        return value.split("\t#", 1)[0].rstrip()
+    return value
+
+
+def read_env_file(path: Path, name: str = ENV_VAR) -> Optional[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, UnicodeError):
+        return None
+    value = parse_dotenv(text).get(name, "").strip()
+    return value or None
+
+
+def read_key_file(path: Path) -> Optional[str]:
+    """A key file is either a bare key or a ``KEY=VALUE`` file."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, UnicodeError):
+        return None
+    parsed = parse_dotenv(text)
+    if ENV_VAR in parsed:
+        return parsed[ENV_VAR].strip() or None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[0] if lines and not lines[0].startswith("#") else None
+
+
+def read_key_command(command: str) -> Optional[str]:
+    try:
+        completed = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=CMD_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ConfigError(f"{KEY_CMD_ENV} command failed: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip().splitlines()
+        suffix = f": {detail[-1]}" if detail else ""
+        raise ConfigError(
+            f"{KEY_CMD_ENV} exited {completed.returncode}{suffix}"
+        )
+    for line in reversed(completed.stdout.splitlines()):
+        if line.strip():
+            return line.strip()
+    return None
+
+
+def resolve_key(
+    explicit: Optional[str] = None,
+    key_file: Optional[Path] = None,
+    env_file: Optional[Path] = None,
+    use_env_files: bool = True,
+    cwd: Optional[Path] = None,
+) -> KeyResolution:
+    """Find a key or raise :class:`ConfigError` with the searched paths."""
+    if explicit and explicit.strip():
+        return KeyResolution(explicit.strip(), "argument", "api_key")
+
+    env_value = (os.getenv(ENV_VAR) or "").strip()
+    if env_value:
+        return KeyResolution(env_value, "env", ENV_VAR)
+
+    file_candidates: List[Path] = []
+    if key_file is not None:
+        file_candidates.append(Path(key_file).expanduser())
+    elif os.getenv(KEY_FILE_ENV):
+        file_candidates.append(Path(os.environ[KEY_FILE_ENV]).expanduser())
+    for path in file_candidates:
+        value = read_key_file(path)
+        if value:
+            return KeyResolution(value, "file", str(path))
+
+    command = (os.getenv(KEY_CMD_ENV) or "").strip()
+    if command:
+        value = read_key_command(command)
+        if value:
+            return KeyResolution(value, "command", KEY_CMD_ENV)
+
+    if use_env_files:
+        candidates = [Path(env_file).expanduser()] if env_file else candidate_env_files(cwd)
+        for path in candidates:
+            value = read_env_file(path)
+            if value:
+                return KeyResolution(value, "dotenv", str(path))
+
+    for secret in SECRET_PATHS:
+        value = read_key_file(Path(secret))
+        if value:
+            return KeyResolution(value, "secret", secret)
+
+    raise ConfigError(_missing_key_message(cwd, env_file, use_env_files))
+
+
+def _missing_key_message(
+    cwd: Optional[Path], env_file: Optional[Path], use_env_files: bool
+) -> str:
+    lines = [
+        f"No DeepSeek API key found. Set {ENV_VAR}, or run 'deepseek-web key set' "
+        "to store one from stdin in ./.env (mode 0600).",
+        "Then verify with: deepseek-web doctor",
+    ]
+    if use_env_files:
+        paths = [Path(env_file).expanduser()] if env_file else candidate_env_files(cwd)
+        existing = [str(path) for path in paths if path.exists()]
+        lines.append(
+            "Checked .env files: " + (", ".join(existing) if existing else "none found")
+        )
+    lines.append(f"Other sources: {KEY_FILE_ENV}, {KEY_CMD_ENV}, {', '.join(SECRET_PATHS)}")
+    return "\n".join(lines)
+
+
+# -- writing -------------------------------------------------------------
+
+
+def write_env_file(path: Path, values: Dict[str, str], mode: int = 0o600) -> Path:
+    """Merge ``values`` into ``path`` atomically, preserving other entries."""
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_lines: List[str] = []
+    if target.exists():
+        existing_lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    pending = dict(values)
+    output: List[str] = []
+    for line in existing_lines:
+        match = _ASSIGNMENT.match(line.strip())
+        if match and match.group(1) in pending:
+            name = match.group(1)
+            output.append(f"{name}={_quote(pending.pop(name))}")
+        else:
+            output.append(line)
+    for name, value in pending.items():
+        output.append(f"{name}={_quote(value)}")
+
+    tmp = target.with_name(f"{target.name}.tmp")
+    tmp.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    try:
+        os.chmod(tmp, mode)
+    except OSError:
+        pass
+    os.replace(tmp, target)
+    return target
+
+
+def remove_env_key(path: Path, name: str = ENV_VAR) -> bool:
+    target = Path(path).expanduser()
+    if not target.exists():
+        return False
+    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    kept = [
+        line
+        for line in lines
+        if not (
+            (match := _ASSIGNMENT.match(line.strip()))
+            and match.group(1) == name
+        )
+    ]
+    if len(kept) == len(lines):
+        return False
+    tmp = target.with_name(f"{target.name}.tmp")
+    tmp.write_text("\n".join(kept).rstrip() + "\n", encoding="utf-8")
+    try:
+        os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+    os.replace(tmp, target)
+    return True
+
+
+def _quote(value: str) -> str:
+    if any(ch in value for ch in (" ", "#", "\t", '"', "'")):
+        return '"' + value.replace('"', '\\"') + '"'
+    return value
+
+
+# -- environment diagnostics --------------------------------------------
+
+
+def diagnose_zeroclaw(config_path: Optional[Path] = None) -> Dict[str, object]:
+    """Report whether ZeroClaw's own config holds a usable plaintext key.
+
+    ZeroClaw stores provider keys encrypted at rest (``enc2:``) and only
+    hands them to shells listed in ``[risk_profiles.*].shell_env_passthrough``.
+    An encrypted blob is not a credential, so this is worth surfacing.
+    """
+    path = Path(
+        config_path or os.getenv("ZEROCLAW_CONFIG") or Path.home() / ".zeroclaw" / "config.toml"
+    )
+    report: Dict[str, object] = {"config": str(path), "exists": path.exists()}
+    if not path.exists():
+        return report
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        report["error"] = str(exc)
+        return report
+
+    matches = re.findall(
+        r'^\[providers\.models\.deepseek\.[^\]]+\][^\[]*?^api_key\s*=\s*"([^"]*)"',
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    report["provider_keys"] = len(matches)
+    report["encrypted"] = [bool(m.startswith("enc")) for m in matches]
+    if matches and all(m.startswith("enc") for m in matches):
+        report["note"] = (
+            "ZeroClaw holds only encrypted (enc2:) provider keys. They are decrypted "
+            "in-process for model calls and are not usable as a plaintext API key. "
+            "Export a platform key, or add DEEPSEEK_API_KEY to "
+            "[risk_profiles.<name>].shell_env_passthrough so this shell inherits it."
+        )
+    return report

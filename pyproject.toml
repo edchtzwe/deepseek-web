@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepseek-web"
+version = "0.3.0"
+description = "Search and fetch the web through DeepSeek's tool API - zero-dependency CLI for agents"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Ed" }]
+keywords = ["deepseek", "search", "fetch", "web", "agent", "cli"]
+dependencies = []
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Internet :: WWW/HTTP",
+  "Typing :: Typed",
+]
+
+[project.scripts]
+deepseek-web = "deepseek_web.cli:main"
+
+[project.urls]
+Documentation = "https://api-docs.deepseek.com/guides/search/"
+
+[tool.setuptools]
+packages = ["deepseek_web"]

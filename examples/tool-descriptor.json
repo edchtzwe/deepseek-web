@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "deepseek_web",
+  "version": "0.3.0",
+  "description": "Search the web or fetch a URL through DeepSeek's tool API. Returns JSON on stdout; errors go to stderr with a documented exit code.",
+  "transport": "subprocess",
+  "executable": "deepseek-web",
+  "fallback_executable": [
+    "python3",
+    "-m",
+    "deepseek_web"
+  ],
+  "timeout_seconds": 60,
+  "env": {
+    "DEEPSEEK_API_KEY": {
+      "required": false,
+      "secret": true,
+      "description": "DeepSeek platform key (sk-...). Optional: the tool also auto-discovers the key from --env-file, DEEPSEEK_API_KEY_FILE, DEEPSEEK_API_KEY_CMD, a .env found walking up from cwd, ~/.config/deepseek-web/.env, or /run/secrets/deepseek_api_key."
+    },
+    "DEEPSEEK_API_BASE": {
+      "required": false,
+      "default": "https://api.deepseek.com/v1/tools"
+    },
+    "DEEPSEEK_TIMEOUT": {
+      "required": false,
+      "default": "30"
+    },
+    "DEEPSEEK_RETRIES": {
+      "required": false,
+      "default": "2"
+    }
+  },
+  "actions": {
+    "search": {
+      "description": "Search the web and return ranked results.",
+      "argv": [
+        "search",
+        "{query}",
+        "--count",
+        "{count}"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Search query."
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 5,
+            "description": "Number of results to return."
+          },
+          "need_content": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include extracted page content per result."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "site_name": {
+                  "type": "string"
+                },
+                "date": {
+                  "type": "string"
+                },
+                "rerank_score": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "authority": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "fetch": {
+      "description": "Fetch one URL and return its title and extracted readable content.",
+      "argv": [
+        "fetch",
+        "{url}"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "maxLength": 8192,
+            "pattern": "^https?://",
+            "description": "Absolute http(s) URL."
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "doctor": {
+      "description": "Report local readiness without network access.",
+      "argv": [
+        "doctor"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  },
+  "exit_codes": {
+    "0": "success",
+    "1": "unexpected internal error",
+    "2": "usage or validation error",
+    "3": "configuration error (missing API key)",
+    "4": "API error (see status_code in the stderr payload)",
+    "5": "network error - safe to retry with backoff"
+  },
+  "error_envelope": {
+    "channel": "stderr",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "status_code": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "safety": {
+    "stdout_on_failure": "empty",
+    "network": "only the configured API base and user-supplied URLs",
+    "credentials": "resolved from env, key file, command, .env (0600) or secret mount; never printed, never sent anywhere",
+    "output_cap": "summary/content capped at 8000 chars by default (--max-chars)"
+  }
+}
