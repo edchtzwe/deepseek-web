@@ -61,10 +61,13 @@ source in this order:
 | # | Source | How |
 | :--- | :--- | :--- |
 | 1 | Environment | `DEEPSEEK_API_KEY` |
-| 2 | Key file | `--env-file PATH`, or `DEEPSEEK_API_KEY_FILE=/path/to/key` |
+| 2 | Key file | `DEEPSEEK_API_KEY_FILE=/path/to/key` — a bare key, or a file containing `DEEPSEEK_API_KEY=...` |
 | 3 | Command | `DEEPSEEK_API_KEY_CMD="pass show deepseek"` (stdout is the key) |
-| 4 | `.env` discovery | walking up from `cwd`, then `~/.config/deepseek-web/.env`, then `~/.env` |
-| 5 | Secret mount | `/run/secrets/deepseek_api_key` |
+| 4 | `.env` file | `--env-file PATH` or `DEEPSEEK_WEB_ENV_FILE`, else discovery: walking up from `cwd`, then `~/.config/deepseek-web/.env`, then `~/.env`. Must be `KEY=VALUE` format — a bare key here is not read |
+| 5 | Secret mount | `/run/secrets/deepseek_api_key`, `/run/secrets/DEEPSEEK_API_KEY`, `/run/secrets/deepseek-web` |
+
+`--no-env-file` skips source 4 entirely. A key file (2) and a `.env` (4) are not
+interchangeable: the key file may hold the raw key alone, the `.env` may not.
 
 Empty values count as missing. That matters in containers, where compose commonly declares
 `DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}` and an unset host variable arrives as `""`.
@@ -91,6 +94,8 @@ Optional environment overrides:
 | `DEEPSEEK_API_BASE` | `https://api.deepseek.com/v1/tools` | Point at a mirror or proxy |
 | `DEEPSEEK_TIMEOUT` | `30` | Per-request timeout, seconds |
 | `DEEPSEEK_RETRIES` | `2` | Retries on 429/5xx/timeout |
+| `DEEPSEEK_MAX_CHARS` | `8000` | Default `--max-chars` |
+| `DEEPSEEK_WEB_ENV_FILE` | none | A `.env` file to prefer over discovery |
 
 ### Containers: get the key in without a .env
 
@@ -184,7 +189,7 @@ source), and readiness. Never touches the network, never prints the key.
 ### `key`
 
 ```bash
-deepseek-web key status          # resolution chain + zero-claw config diagnosis
+deepseek-web key status          # resolution chain: which source wins, and why
 ```
 
 Read-only by design: there is no `key set` and no `key clear`. The tool reports where a key
@@ -201,6 +206,8 @@ a wrapped secret rather than a plaintext key.
 | `--raw` | Print the untouched API response — use this to verify field names |
 | `--unescape` | Strip markdown backslash-escapes from `summary` / `content` |
 | `--max-chars N` | Cap `summary` / `content` per field (default `8000`, `0` = unlimited) |
+| `--env-file PATH` | Read the key from this `.env` instead of discovering one |
+| `--no-env-file` | Skip `.env` discovery (env, key file and command only) |
 | `--api-base URL` | Override the endpoint |
 | `--timeout SECONDS` | Override the timeout |
 | `--retries N` | Override the retry count |
@@ -294,10 +301,10 @@ take the agent down.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t . -v
+python -m pytest tests/ -q
 ```
 
-109 tests, no network, no key required. Everything HTTP is mocked.
+Same command CI runs. No network, no key required — everything HTTP is mocked.
 
 ## Status and limitations
 

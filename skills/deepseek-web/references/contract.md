@@ -90,10 +90,12 @@ First non-empty source wins. An empty string counts as missing, which is why a c
 `DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}` and an unset host variable behaves as "no key".
 
 1. `DEEPSEEK_API_KEY`
-2. `--env-file PATH`, or `DEEPSEEK_API_KEY_FILE`
+2. `DEEPSEEK_API_KEY_FILE` — a bare key, or a file containing `DEEPSEEK_API_KEY=...`
 3. `DEEPSEEK_API_KEY_CMD` (a shell command whose stdout is the key)
-4. `.env` found walking up from `cwd`, then `~/.config/deepseek-web/.env`, then `~/.env`
-5. `/run/secrets/deepseek_api_key`
+4. `.env`: `--env-file PATH` or `DEEPSEEK_WEB_ENV_FILE` when given, else walking up from `cwd`,
+   then `~/.config/deepseek-web/.env`, then `~/.env`. `KEY=VALUE` format only; `--no-env-file`
+   skips this step
+5. `/run/secrets/deepseek_api_key`, `/run/secrets/DEEPSEEK_API_KEY`, `/run/secrets/deepseek-web`
 
 A wrapped secret (`enc2:...`, `gpg:...`, `sops:...`, `age:...`, `vault:...`) is ciphertext, not a
 credential — sending one always returns 401. Resolution refuses it with exit `3` before any
@@ -108,6 +110,7 @@ ever decrypted: the check is a prefix test on the value that was found.
 | `DEEPSEEK_API_BASE` | `https://api.deepseek.com/v1/tools` |
 | `DEEPSEEK_TIMEOUT` | `30` seconds |
 | `DEEPSEEK_RETRIES` | `2` |
+| `DEEPSEEK_WEB_ENV_FILE` | unset |
 | `DEEPSEEK_MAX_CHARS` | `8000` (`0` = unlimited) |
 
 ## Python use (no subprocess)
