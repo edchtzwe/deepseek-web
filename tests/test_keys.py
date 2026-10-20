@@ -18,10 +18,8 @@ from deepseek_web.keys import (
     candidate_env_files,
     looks_encrypted,
     parse_dotenv,
-    read_env_file,
-    remove_env_key,
+    read_key_file,
     resolve_key,
-    write_env_file,
 )
 
 
@@ -52,6 +50,36 @@ class ParseDotenvTests(unittest.TestCase):
     def test_ignores_malformed_lines(self):
         parsed = parse_dotenv("not an assignment\n=novalue\nOK=1\n")
         self.assertEqual(parsed, {"OK": "1"})
+
+
+class ReadKeyFileTests(unittest.TestCase):
+    """A bare key file is read by skipping comments, not by rejecting them."""
+
+    def _keyfile(self, text: str) -> "Path":
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".key", delete=False)
+        tmp.write(text)
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        return Path(tmp.name)
+
+    def test_leading_comment_does_not_hide_the_key(self):
+        path = self._keyfile("# my deepseek key\nsk-live\n")
+        self.assertEqual(read_key_file(path), "sk-live")
+
+    def test_comment_block_then_key(self):
+        path = self._keyfile("\n# note\n# another note\n\n  sk-live  \n")
+        self.assertEqual(read_key_file(path), "sk-live")
+
+    def test_commented_candidate_is_never_returned(self):
+        path = self._keyfile("#DEEPSEEK_API_KEY=sk-commented\n")
+        self.assertIsNone(read_key_file(path))
+
+    def test_env_style_line_still_wins(self):
+        path = self._keyfile("# leading\nDEEPSEEK_API_KEY=sk-eq\n")
+        self.assertEqual(read_key_file(path), "sk-eq")
+
+    def test_empty_file_is_none(self):
+        self.assertIsNone(read_key_file(self._keyfile("")))
 
 
 class CandidateEnvFileTests(unittest.TestCase):
@@ -143,7 +171,11 @@ class ResolutionPrecedenceTests(unittest.TestCase):
         self.secret.unlink()
         with self.assertRaises(ConfigError) as ctx:
             resolve_key()
-        self.assertIn("key set", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn(ENV_VAR, message)
+        self.assertIn("DEEPSEEK_API_KEY_CMD", message)
+        # The tool never offers to provision; provisioning is the user's job.
+        self.assertNotIn("key set", message)
 
     def test_no_env_files_flag(self):
         self.assertEqual(resolve_key(use_env_files=False).source, "secret")
@@ -153,44 +185,6 @@ class ResolutionPrecedenceTests(unittest.TestCase):
         resolution = resolve_key()
         self.assertEqual(resolution.masked, "****1234")
         self.assertNotIn("abcdef", resolution.masked)
-
-
-class EnvFileWriteTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self.tmp.name) / ".env"
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def test_creates_0600_and_roundtrips(self):
-        write_env_file(self.path, {ENV_VAR: "sk-12345678"})
-        self.assertEqual(read_env_file(self.path), "sk-12345678")
-        if os.name == "posix":
-            self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
-
-    def test_preserves_other_entries(self):
-        self.path.write_text("OTHER=keep\nDEEPSEEK_API_KEY=old\n")
-        write_env_file(self.path, {ENV_VAR: "new"})
-        text = self.path.read_text()
-        self.assertIn("OTHER=keep", text)
-        self.assertIn("DEEPSEEK_API_KEY=new", text)
-        self.assertEqual(text.count("DEEPSEEK_API_KEY="), 1)
-
-    def test_appends_when_absent(self):
-        self.path.write_text("OTHER=1\n")
-        write_env_file(self.path, {ENV_VAR: "sk-abc"})
-        self.assertEqual(read_env_file(self.path), "sk-abc")
-
-    def test_quotes_values_with_spaces(self):
-        write_env_file(self.path, {ENV_VAR: 'sk-with "quote"'})
-        self.assertEqual(read_env_file(self.path), 'sk-with "quote"')
-
-    def test_remove(self):
-        write_env_file(self.path, {ENV_VAR: "sk-abc"})
-        self.assertTrue(remove_env_key(self.path))
-        self.assertFalse(remove_env_key(self.path))
-        self.assertIsNone(read_env_file(self.path))
 
 
 class LooksEncryptedTests(unittest.TestCase):

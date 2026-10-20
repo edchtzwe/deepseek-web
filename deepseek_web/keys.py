@@ -24,11 +24,10 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .errors import ConfigError, EncryptedKeyError
 
@@ -103,7 +102,7 @@ def parse_dotenv(text: str) -> Dict[str, str]:
     """Parse a minimal ``KEY=VALUE`` file. No interpolation, no surprises."""
     values: Dict[str, str] = {}
     for raw_line in text.splitlines():
-        line = raw_line.strip()
+        line = raw_line.lstrip()
         if not line or line.startswith("#"):
             continue
         match = _ASSIGNMENT.match(line)
@@ -147,8 +146,12 @@ def read_key_file(path: Path) -> Optional[str]:
     parsed = parse_dotenv(text)
     if ENV_VAR in parsed:
         return parsed[ENV_VAR].strip() or None
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return lines[0] if lines and not lines[0].startswith("#") else None
+    for raw_line in text.splitlines():
+        line = raw_line.lstrip()
+        if not line or line.startswith("#"):
+            continue
+        return line.strip()
+    return None
 
 
 def read_key_command(command: str) -> Optional[str]:
@@ -232,8 +235,10 @@ def _missing_key_message(
     cwd: Optional[Path], env_file: Optional[Path], use_env_files: bool
 ) -> str:
     lines = [
-        f"No DeepSeek API key found. Set {ENV_VAR}, or run 'deepseek-web key set' "
-        "to store one from stdin in ./.env (mode 0600).",
+        f"No DeepSeek API key found. Set {ENV_VAR} in the environment.",
+        f"Alternatives: {KEY_FILE_ENV} (a file holding only the key) or "
+        f"{KEY_CMD_ENV} (a command whose stdout is the key).",
+        "This tool never stores or writes a key; provisioning is the user's job.",
         "Then verify with: deepseek-web doctor",
     ]
     if use_env_files:
@@ -242,73 +247,8 @@ def _missing_key_message(
         lines.append(
             "Checked .env files: " + (", ".join(existing) if existing else "none found")
         )
-    lines.append(f"Other sources: {KEY_FILE_ENV}, {KEY_CMD_ENV}, {', '.join(SECRET_PATHS)}")
+    lines.append(f"Secret mounts checked: {', '.join(SECRET_PATHS)}")
     return "\n".join(lines)
-
-
-# -- writing -------------------------------------------------------------
-
-
-def write_env_file(path: Path, values: Dict[str, str], mode: int = 0o600) -> Path:
-    """Merge ``values`` into ``path`` atomically, preserving other entries."""
-    target = Path(path).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    existing_lines: List[str] = []
-    if target.exists():
-        existing_lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-
-    pending = dict(values)
-    output: List[str] = []
-    for line in existing_lines:
-        match = _ASSIGNMENT.match(line.strip())
-        if match and match.group(1) in pending:
-            name = match.group(1)
-            output.append(f"{name}={_quote(pending.pop(name))}")
-        else:
-            output.append(line)
-    for name, value in pending.items():
-        output.append(f"{name}={_quote(value)}")
-
-    tmp = target.with_name(f"{target.name}.tmp")
-    tmp.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
-    try:
-        os.chmod(tmp, mode)
-    except OSError:
-        pass
-    os.replace(tmp, target)
-    return target
-
-
-def remove_env_key(path: Path, name: str = ENV_VAR) -> bool:
-    target = Path(path).expanduser()
-    if not target.exists():
-        return False
-    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-    kept = [
-        line
-        for line in lines
-        if not (
-            (match := _ASSIGNMENT.match(line.strip()))
-            and match.group(1) == name
-        )
-    ]
-    if len(kept) == len(lines):
-        return False
-    tmp = target.with_name(f"{target.name}.tmp")
-    tmp.write_text("\n".join(kept).rstrip() + "\n", encoding="utf-8")
-    try:
-        os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
-    os.replace(tmp, target)
-    return True
-
-
-def _quote(value: str) -> str:
-    if any(ch in value for ch in (" ", "#", "\t", '"', "'")):
-        return '"' + value.replace('"', '\\"') + '"'
-    return value
 
 
 # -- sanity checks -------------------------------------------------------
@@ -340,5 +280,5 @@ def encrypted_key_message(value: str) -> str:
         f"The value found is wrapped secret data (prefix '{scheme}:'), not a plaintext API key. "
         "Encrypted-at-rest values are decrypted by whichever tool owns them and "
         f"cannot be used as a credential here. Supply the raw key via {ENV_VAR}, "
-        f"'deepseek-web key set', {KEY_FILE_ENV}, or {KEY_CMD_ENV}."
+        f"{KEY_FILE_ENV}, or {KEY_CMD_ENV}."
     )

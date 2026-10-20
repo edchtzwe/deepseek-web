@@ -41,16 +41,22 @@ deepseek-web doctor
 ```
 
 - `"ready": true` → proceed.
-- `"api_key_set": false` → the key is missing. Tell the user, and let them provision it
-  themselves:
+- `"api_key_set": false` → the key is missing. **Stop and hand it back.** This tool only
+  reads a key; it never stores one, and you must not offer to set one up.
+
+  Say plainly that the user needs a DeepSeek API key and point them at the three ways to
+  supply one:
 
   ```bash
-  # the user runs this, or exports DEEPSEEK_API_KEY in the environment
-  deepseek-web key set        # reads the key from stdin, writes ./.env at mode 0600
+  export DEEPSEEK_API_KEY=...                        # environment, preferred
+  export DEEPSEEK_API_KEY_FILE=/path/to/key          # file holding only the key
+  export DEEPSEEK_API_KEY_CMD="pass show deepseek"   # command, stdout is the key
   ```
 
-  Never ask the user to paste a key into chat, and never echo one back. `doctor` prints a masked
-  hint only.
+  If the user is on a hosted agent that already integrates DeepSeek as a provider, the key
+  likely exists there under a different variable name — that platform's own setup owns it.
+  Do not paper over the gap by writing a `.env` "just to get it working". Never ask the user
+  to paste a key into chat, and never echo one back. `doctor` prints a masked hint only.
 
 `doctor` never touches the network, so it costs nothing.
 
