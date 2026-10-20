@@ -34,14 +34,13 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest
           python -m pip install -e .
 
       - name: Show interpreter
         run: python -VV
 
       - name: Test suite
-        run: python -m pytest tests/ -q
+        run: python -m unittest discover -s tests -t . -v
 
       - name: CLI smoke test
         # The package must import and answer without a key; doctor is offline.

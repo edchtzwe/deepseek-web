@@ -8,11 +8,12 @@ Resolution order (first non-empty wins):
 
 1. explicit argument (library callers only)
 2. ``DEEPSEEK_API_KEY`` environment variable
-3. ``--env-file`` path, or ``DEEPSEEK_API_KEY_FILE`` (file containing the key)
+3. ``DEEPSEEK_API_KEY_FILE`` - a bare key, or a file carrying an assignment
 4. ``DEEPSEEK_API_KEY_CMD`` - shell command whose stdout is the key
    (``pass show deepseek``, ``op read op://...``, ``docker exec ...``)
-5. ``.env`` files discovered walking up from the working directory, then
-   ``~/.config/deepseek-web/.env`` and ``~/.deepseek-web.env``
+5. ``.env`` files: ``--env-file`` / ``DEEPSEEK_WEB_ENV_FILE`` when given, else
+   discovered walking up from the working directory, then
+   ``~/.config/deepseek-web/.env`` and ``~/.env``
 6. well-known secret mounts (``/run/secrets/...``)
 
 Empty values are treated as missing, which matters because compose files
