@@ -32,7 +32,6 @@ from .keys import (
     looks_encrypted,
     parse_dotenv,
     resolve_key,
-    write_env_file,
 )
 from .models import FetchedPage, SearchResult
 from .validation import (

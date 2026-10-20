@@ -69,23 +69,20 @@ source in this order:
 Empty values count as missing. That matters in containers, where compose commonly declares
 `DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}` and an unset host variable arrives as `""`.
 
-**No .env to write by hand.** Provision once, from stdin, and the tool stores it at `./.env`
-with mode `0600`:
+**The tool never writes a key.** It only reads one — from the environment, a key file, a
+command, a `.env` you already have, or a secret mount. Provisioning is yours to do, wherever
+you normally keep credentials: a compose `environment:` block, your shell profile, `pass`,
+1Password, or your platform's own provider settings. There is no `key set` to run and nothing
+for this tool to leave behind on disk.
 
 ```bash
-echo "$KEY" | deepseek-web key set        # or: deepseek-web key set --value "$KEY"
-deepseek-web key status                   # where would the key come from?
-deepseek-web key clear                    # remove it again
+deepseek-web key status          # where would the key come from?
 ```
-
-`key set` merges into an existing `.env` instead of overwriting it, writes atomically, chmods
-the file, and reminds you to keep it out of version control. It does not inspect your
-repository — that judgement stays with you.
 
 > Some runtimes store provider keys **encrypted at rest** (`enc2:`, `gpg:`, `sops:`, `age:`,
 > `vault:` ...). Those blobs are decrypted by whichever tool owns them and are not usable as a
-> credential here — sending one always gets a 401. The tool refuses them up front: `key status`
-> flags it, `key set` rejects it, and a call exits `3` instead of wasting a request.
+> credential here — sending one always gets a 401. `key status` flags it and a call exits `3`
+> instead of wasting a request.
 
 Optional environment overrides:
 
@@ -188,9 +185,10 @@ source), and readiness. Never touches the network, never prints the key.
 
 ```bash
 deepseek-web key status          # resolution chain + zero-claw config diagnosis
-deepseek-web key set             # read key from stdin, write ./.env (0600)
-deepseek-web key clear           # remove it from ./.env
 ```
+
+Read-only by design: there is no `key set` and no `key clear`. The tool reports where a key
+would come from; it never stores, moves or deletes one.
 
 `key status` also lists the `.env` files it looked at, and reports when the resolved value is
 a wrapped secret rather than a plaintext key.

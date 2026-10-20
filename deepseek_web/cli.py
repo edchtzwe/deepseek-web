@@ -38,21 +38,13 @@ from .errors import (
 from .keys import (
     ENV_VAR,
     candidate_env_files,
-    encrypted_key_message,
-    looks_encrypted,
     resolve_key,
-    write_env_file,
-    remove_env_key,
 )
 from .models import FetchedPage, SearchResult
 from .textproc import strip_markdown_escapes
 from .validation import DEFAULT_MAX_CHARS, truncate_text, validate_max_chars
 
 EXIT_OK = 0
-
-#: Printed on every successful `key set`. Written to a file that may well be
-#: inside a repo; keeping it out of version control is the user's call, not ours.
-ENV_FILE_NOTE = ".env holds a secret — keep it out of version control"
 EXIT_UNEXPECTED = 1
 EXIT_USAGE = 2
 EXIT_CONFIG = 3
@@ -169,21 +161,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     key = subparsers.add_parser(
         "key",
-        help="inspect or provision the API key (status, set, clear)",
+        help="inspect where the API key would come from (status)",
     )
     key_sub = key.add_subparsers(dest="key_action", metavar="ACTION")
     key_sub.add_parser("status", parents=[common], help="show where the key would come from")
-    key_set = key_sub.add_parser(
-        "set", parents=[common], help="store a key in .env (reads stdin by default)"
-    )
-    key_set.add_argument("--value", default=None, help="key value (prefer stdin; argv leaks to ps)")
-    key_set.add_argument(
-        "--path",
-        default=None,
-        help="target .env file (default: ./.env)",
-    )
-    key_clear = key_sub.add_parser("clear", parents=[common], help="remove the key from .env")
-    key_clear.add_argument("--path", default=None, help="target .env file (default: ./.env)")
     return parser
 
 
@@ -424,65 +405,12 @@ def run_key_status(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def run_key_set(args: argparse.Namespace) -> int:
-    if args.value is not None:
-        # Explicitly passed --value: never fall through to stdin, or a blank
-        # value would look like a hang when stdin is an interactive terminal.
-        value = args.value.strip()
-        if not value:
-            raise ValidationError("refusing to store an empty key")
-    else:
-        if sys.stdin is None or sys.stdin.isatty():
-            raise ValidationError(
-                "no key provided; pipe it on stdin or pass --value"
-            )
-        try:
-            value = sys.stdin.read().strip()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ConfigError(f"could not read key from stdin: {exc}") from exc
-    if not value:
-        raise ValidationError("refusing to store an empty key")
-    if any(ch.isspace() for ch in value):
-        raise ValidationError("API key must not contain whitespace")
-    if looks_encrypted(value):
-        raise ValidationError(encrypted_key_message(value))
-
-    target = Path(args.path).expanduser() if args.path else Path.cwd() / ".env"
-    written = write_env_file(target, {ENV_VAR: value})
-    payload = {
-        "stored": True,
-        "path": str(written),
-        "mode": oct(written.stat().st_mode & 0o777),
-        "api_key_hint": f"****{value[-4:]}" if len(value) >= 8 else "****",
-        "note": ENV_FILE_NOTE,
-    }
-    if args.format == "json":
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
-    else:
-        print(f"stored key {payload['api_key_hint']} in {payload['path']} ({payload['mode']})")
-        print(f"  note: {ENV_FILE_NOTE}")
-    return EXIT_OK
-
-
-def run_key_clear(args: argparse.Namespace) -> int:
-    target = Path(args.path).expanduser() if args.path else Path.cwd() / ".env"
-    removed = remove_env_key(target)
-    payload = {"removed": removed, "path": str(target)}
-    if args.format == "json":
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
-    else:
-        print(f"{'removed' if removed else 'no key found in'} {target}")
-    return EXIT_OK
-
-
 def run_key(args: argparse.Namespace) -> int:
     handlers = {
         "status": run_key_status,
-        "set": run_key_set,
-        "clear": run_key_clear,
     }
     if not getattr(args, "key_action", None):
-        raise ValidationError("key requires an action: status, set, or clear")
+        raise ValidationError("key requires an action: status")
     return handlers[args.key_action](args)
 
 
