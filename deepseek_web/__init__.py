@@ -17,15 +17,21 @@ from .client import (
     resolve_api_base,
     resolve_api_key,
 )
-from .errors import APIError, ConfigError, DeepSeekError, NetworkError, ValidationError
+from .errors import (
+    APIError,
+    ConfigError,
+    DeepSeekError,
+    EncryptedKeyError,
+    NetworkError,
+    ValidationError,
+)
 from .keys import (
     ENV_VAR as API_KEY_ENV_VAR,
     KeyResolution,
     candidate_env_files,
-    diagnose_zeroclaw,
+    looks_encrypted,
     parse_dotenv,
     resolve_key,
-    write_env_file,
 )
 from .models import FetchedPage, SearchResult
 from .validation import (
@@ -39,7 +45,7 @@ from .validation import (
     validate_url,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "APIError",
@@ -51,6 +57,7 @@ __all__ = [
     "DEFAULT_RETRIES",
     "DEFAULT_TIMEOUT",
     "DeepSeekError",
+    "EncryptedKeyError",
     "FetchedPage",
     "MAX_COUNT",
     "MAX_QUERY_LEN",
@@ -61,6 +68,7 @@ __all__ = [
     "ValidationError",
     "__version__",
     "error_message",
+    "looks_encrypted",
     "parse_count",
     "resolve_api_base",
     "resolve_api_key",

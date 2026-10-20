@@ -41,16 +41,22 @@ deepseek-web doctor
 ```
 
 - `"ready": true` → proceed.
-- `"api_key_set": false` → the key is missing. Tell the user, and let them provision it
-  themselves:
+- `"api_key_set": false` → the key is missing. **Stop and hand it back.** This tool only
+  reads a key; it never stores one, and you must not offer to set one up.
+
+  Say plainly that the user needs a DeepSeek API key and point them at the three ways to
+  supply one:
 
   ```bash
-  # the user runs this, or exports DEEPSEEK_API_KEY in the environment
-  deepseek-web key set        # reads the key from stdin, writes ./.env at mode 0600
+  export DEEPSEEK_API_KEY=...                        # environment, preferred
+  export DEEPSEEK_API_KEY_FILE=/path/to/key          # file holding only the key
+  export DEEPSEEK_API_KEY_CMD="pass show deepseek"   # command, stdout is the key
   ```
 
-  Never ask the user to paste a key into chat, and never echo one back. `doctor` prints a masked
-  hint only.
+  If the user is on a hosted agent that already integrates DeepSeek as a provider, the key
+  likely exists there under a different variable name — that platform's own setup owns it.
+  Do not paper over the gap by writing a `.env` "just to get it working". Never ask the user
+  to paste a key into chat, and never echo one back. `doctor` prints a masked hint only.
 
 `doctor` never touches the network, so it costs nothing.
 
@@ -68,11 +74,16 @@ Useful flags:
 | :--- | :--- |
 | `--count N` / `-n N` | 1–50. Default 5. Use 3 for narrow questions, 8+ only for genuine breadth. |
 | `--ori-question Q` | Pass the user's original wording when the search query is a rewrite; improves ranking. |
+| `--localization` | Locale hint such as `en-US`. Optional. |
 | `--unescape` | Pass when the text will be read as prose. `fetch` and long summaries arrive with markdown backslashes (`blue\?`); this strips them. |
 | `--need-content` | Only when summaries are not enough. Much larger payload, per-result content. |
 | `--max-chars N` | Per-field cap on `summary`/`content`. Default 8000. `0` disables it. |
 | `--format text` | Human-readable. Do not use when you need to parse. |
 | `--raw` | Untouched API payload. Only for debugging a schema surprise. |
+| `--no-env-file` | Skip `.env` discovery. Use it when the key should come only from the environment, a key file, or a command. |
+
+Key flags act on how the key is found, not what is sent. The tool reads a key; it never
+writes one, so there is nothing here that provisions.
 
 Keep `--count` small unless the task needs breadth. Every result is tokens you pay for on every
 later turn.

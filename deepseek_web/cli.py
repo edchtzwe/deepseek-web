@@ -27,14 +27,18 @@ from .client import (
     Client,
     resolve_api_base,
 )
-from .errors import APIError, ConfigError, DeepSeekError, NetworkError, ValidationError
+from .errors import (
+    APIError,
+    ConfigError,
+    DeepSeekError,
+    EncryptedKeyError,
+    NetworkError,
+    ValidationError,
+)
 from .keys import (
     ENV_VAR,
     candidate_env_files,
-    diagnose_zeroclaw,
     resolve_key,
-    write_env_file,
-    remove_env_key,
 )
 from .models import FetchedPage, SearchResult
 from .textproc import strip_markdown_escapes
@@ -50,6 +54,7 @@ EXIT_NETWORK = 5
 EXIT_CODES = {
     ValidationError: EXIT_USAGE,
     ConfigError: EXIT_CONFIG,
+    EncryptedKeyError: EXIT_CONFIG,
     APIError: EXIT_API,
     NetworkError: EXIT_NETWORK,
 }
@@ -156,21 +161,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     key = subparsers.add_parser(
         "key",
-        help="inspect or provision the API key (status, set, clear)",
+        help="inspect where the API key would come from (status)",
     )
     key_sub = key.add_subparsers(dest="key_action", metavar="ACTION")
     key_sub.add_parser("status", parents=[common], help="show where the key would come from")
-    key_set = key_sub.add_parser(
-        "set", parents=[common], help="store a key in .env (reads stdin by default)"
-    )
-    key_set.add_argument("--value", default=None, help="key value (prefer stdin; argv leaks to ps)")
-    key_set.add_argument(
-        "--path",
-        default=None,
-        help="target .env file (default: ./.env)",
-    )
-    key_clear = key_sub.add_parser("clear", parents=[common], help="remove the key from .env")
-    key_clear.add_argument("--path", default=None, help="target .env file (default: ./.env)")
     return parser
 
 
@@ -353,6 +347,7 @@ def run_doctor(args: argparse.Namespace) -> int:
 
 
 def run_key_status(args: argparse.Namespace) -> int:
+    encrypted = False
     try:
         resolution = resolve_key(
             env_file=args.env_file, use_env_files=not args.no_env_file
@@ -363,15 +358,27 @@ def run_key_status(args: argparse.Namespace) -> int:
             "api_key_hint": resolution.masked,
             "source": resolution.describe(),
         }
+    except EncryptedKeyError as exc:
+        encrypted = True
+        status = {
+            "ready": False,
+            "api_key_set": False,
+            "api_key_hint": None,
+            "source": None,
+            "api_key_encrypted": True,
+            "error": str(exc),
+        }
     except ConfigError as exc:
         status = {
             "ready": False,
             "api_key_set": False,
             "api_key_hint": None,
             "source": None,
+            "api_key_encrypted": False,
             "error": str(exc),
         }
 
+    status.setdefault("api_key_encrypted", False)
     status["env_files"] = [
         {"path": str(path), "exists": path.exists()}
         for path in (
@@ -380,7 +387,6 @@ def run_key_status(args: argparse.Namespace) -> int:
             else candidate_env_files()
         )
     ]
-    status["zeroclaw"] = diagnose_zeroclaw()
 
     if args.format == "json":
         print(json.dumps(status, indent=2, ensure_ascii=False))
@@ -388,92 +394,23 @@ def run_key_status(args: argparse.Namespace) -> int:
         if status["api_key_set"]:
             source = status["source"]
             print(f"key: {status['api_key_hint']} from {source['source']} ({source['origin']})")
+        elif encrypted:
+            print("key: wrapped secret (unusable)")
         else:
             print("key: missing")
         for entry in status["env_files"]:
             print(f"  .env {entry['path']} {'[present]' if entry['exists'] else ''}".rstrip())
-        note = status["zeroclaw"].get("note")
-        if note:
-            print(f"  note: {note}")
+        if encrypted:
+            print(f"  note: {status['error']}")
     return EXIT_OK
-
-
-def run_key_set(args: argparse.Namespace) -> int:
-    if args.value is not None:
-        # Explicitly passed --value: never fall through to stdin, or a blank
-        # value would look like a hang when stdin is an interactive terminal.
-        value = args.value.strip()
-        if not value:
-            raise ValidationError("refusing to store an empty key")
-    else:
-        if sys.stdin is None or sys.stdin.isatty():
-            raise ValidationError(
-                "no key provided; pipe it on stdin or pass --value"
-            )
-        try:
-            value = sys.stdin.read().strip()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ConfigError(f"could not read key from stdin: {exc}") from exc
-    if not value:
-        raise ValidationError("refusing to store an empty key")
-    if any(ch.isspace() for ch in value):
-        raise ValidationError("API key must not contain whitespace")
-
-    target = Path(args.path).expanduser() if args.path else Path.cwd() / ".env"
-    written = write_env_file(target, {ENV_VAR: value})
-    payload = {
-        "stored": True,
-        "path": str(written),
-        "mode": oct(written.stat().st_mode & 0o777),
-        "api_key_hint": f"****{value[-4:]}" if len(value) >= 8 else "****",
-        "gitignored": _is_gitignored(written),
-    }
-    if args.format == "json":
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
-    else:
-        print(f"stored key {payload['api_key_hint']} in {payload['path']} ({payload['mode']})")
-        if not payload["gitignored"]:
-            print("  warning: this path is not covered by .gitignore")
-    return EXIT_OK
-
-
-def run_key_clear(args: argparse.Namespace) -> int:
-    target = Path(args.path).expanduser() if args.path else Path.cwd() / ".env"
-    removed = remove_env_key(target)
-    payload = {"removed": removed, "path": str(target)}
-    if args.format == "json":
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
-    else:
-        print(f"{'removed' if removed else 'no key found in'} {target}")
-    return EXIT_OK
-
-
-def _is_gitignored(path: Path) -> bool:
-    """Cheap check: is this .env covered by a .gitignore in this or a parent dir?"""
-    name = path.name
-    for directory in [path.parent, *list(path.parent.parents)[:6]]:
-        ignore = directory / ".gitignore"
-        if not ignore.exists():
-            continue
-        try:
-            lines = ignore.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            entry = line.strip()
-            if entry in (name, f"{name}*", f"*.env", "*"):
-                return True
-    return False
 
 
 def run_key(args: argparse.Namespace) -> int:
     handlers = {
         "status": run_key_status,
-        "set": run_key_set,
-        "clear": run_key_clear,
     }
     if not getattr(args, "key_action", None):
-        raise ValidationError("key requires an action: status, set, or clear")
+        raise ValidationError("key requires an action: status")
     return handlers[args.key_action](args)
 
 

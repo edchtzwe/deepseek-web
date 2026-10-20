@@ -69,7 +69,7 @@ rather than markdown. Fenced code blocks and Windows paths are preserved.
 | `type` | Exit | Cause |
 | :--- | :--- | :--- |
 | `usage_error` | 2 | Bad query, URL, count, or flag |
-| `config_error` | 3 | No usable API key, or a malformed override |
+| `config_error` | 3 | No usable API key, a wrapped secret instead of a key, or a malformed override |
 | `api_error` | 4 | Upstream 4xx/5xx; `status_code` is set |
 | `network_error` | 5 | Timeout, DNS, connection reset |
 | `unexpected` | 1 | Bug or unhandled exception |
@@ -90,13 +90,17 @@ First non-empty source wins. An empty string counts as missing, which is why a c
 `DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}` and an unset host variable behaves as "no key".
 
 1. `DEEPSEEK_API_KEY`
-2. `--env-file PATH`, or `DEEPSEEK_API_KEY_FILE`
+2. `DEEPSEEK_API_KEY_FILE` — a bare key, or a file containing `DEEPSEEK_API_KEY=...`
 3. `DEEPSEEK_API_KEY_CMD` (a shell command whose stdout is the key)
-4. `.env` found walking up from `cwd`, then `~/.config/deepseek-web/.env`, then `~/.env`
-5. `/run/secrets/deepseek_api_key`
+4. `.env`: `--env-file PATH` or `DEEPSEEK_WEB_ENV_FILE` when given, else walking up from `cwd`,
+   then `~/.config/deepseek-web/.env`, then `~/.env`. `KEY=VALUE` format only; `--no-env-file`
+   skips this step
+5. `/run/secrets/deepseek_api_key`, `/run/secrets/DEEPSEEK_API_KEY`, `/run/secrets/deepseek-web`
 
-A 131-character `enc2:` value copied out of a ZeroClaw `config.toml` is ciphertext, not a
-credential. It will always 401. `deepseek-web key status` detects and reports this.
+A wrapped secret (`enc2:...`, `gpg:...`, `sops:...`, `age:...`, `vault:...`) is ciphertext, not a
+credential — sending one always returns 401. Resolution refuses it with exit `3` before any
+request is made; `key status` reports `"api_key_encrypted": true` and explains it. Nothing is
+ever decrypted: the check is a prefix test on the value that was found.
 
 ## Environment overrides
 
@@ -106,6 +110,7 @@ credential. It will always 401. `deepseek-web key status` detects and reports th
 | `DEEPSEEK_API_BASE` | `https://api.deepseek.com/v1/tools` |
 | `DEEPSEEK_TIMEOUT` | `30` seconds |
 | `DEEPSEEK_RETRIES` | `2` |
+| `DEEPSEEK_WEB_ENV_FILE` | unset |
 | `DEEPSEEK_MAX_CHARS` | `8000` (`0` = unlimited) |
 
 ## Python use (no subprocess)

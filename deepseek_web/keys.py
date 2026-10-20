@@ -8,11 +8,12 @@ Resolution order (first non-empty wins):
 
 1. explicit argument (library callers only)
 2. ``DEEPSEEK_API_KEY`` environment variable
-3. ``--env-file`` path, or ``DEEPSEEK_API_KEY_FILE`` (file containing the key)
+3. ``DEEPSEEK_API_KEY_FILE`` - a bare key, or a file carrying an assignment
 4. ``DEEPSEEK_API_KEY_CMD`` - shell command whose stdout is the key
    (``pass show deepseek``, ``op read op://...``, ``docker exec ...``)
-5. ``.env`` files discovered walking up from the working directory, then
-   ``~/.config/deepseek-web/.env`` and ``~/.deepseek-web.env``
+5. ``.env`` files: ``--env-file`` / ``DEEPSEEK_WEB_ENV_FILE`` when given, else
+   discovered walking up from the working directory, then
+   ``~/.config/deepseek-web/.env`` and ``~/.env``
 6. well-known secret mounts (``/run/secrets/...``)
 
 Empty values are treated as missing, which matters because compose files
@@ -24,13 +25,12 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from .errors import ConfigError
+from .errors import ConfigError, EncryptedKeyError
 
 ENV_VAR = "DEEPSEEK_API_KEY"
 KEY_FILE_ENV = "DEEPSEEK_API_KEY_FILE"
@@ -103,7 +103,7 @@ def parse_dotenv(text: str) -> Dict[str, str]:
     """Parse a minimal ``KEY=VALUE`` file. No interpolation, no surprises."""
     values: Dict[str, str] = {}
     for raw_line in text.splitlines():
-        line = raw_line.strip()
+        line = raw_line.lstrip()
         if not line or line.startswith("#"):
             continue
         match = _ASSIGNMENT.match(line)
@@ -147,8 +147,12 @@ def read_key_file(path: Path) -> Optional[str]:
     parsed = parse_dotenv(text)
     if ENV_VAR in parsed:
         return parsed[ENV_VAR].strip() or None
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return lines[0] if lines and not lines[0].startswith("#") else None
+    for raw_line in text.splitlines():
+        line = raw_line.lstrip()
+        if not line or line.startswith("#"):
+            continue
+        return line.strip()
+    return None
 
 
 def read_key_command(command: str) -> Optional[str]:
@@ -175,6 +179,13 @@ def read_key_command(command: str) -> Optional[str]:
     return None
 
 
+def _accept(value: str, source: str, origin: str) -> KeyResolution:
+    """Build a resolution, refusing wrapped secrets before they are sent."""
+    if looks_encrypted(value):
+        raise EncryptedKeyError(encrypted_key_message(value))
+    return KeyResolution(value, source, origin)
+
+
 def resolve_key(
     explicit: Optional[str] = None,
     key_file: Optional[Path] = None,
@@ -184,11 +195,11 @@ def resolve_key(
 ) -> KeyResolution:
     """Find a key or raise :class:`ConfigError` with the searched paths."""
     if explicit and explicit.strip():
-        return KeyResolution(explicit.strip(), "argument", "api_key")
+        return _accept(explicit.strip(), "argument", "api_key")
 
     env_value = (os.getenv(ENV_VAR) or "").strip()
     if env_value:
-        return KeyResolution(env_value, "env", ENV_VAR)
+        return _accept(env_value, "env", ENV_VAR)
 
     file_candidates: List[Path] = []
     if key_file is not None:
@@ -198,25 +209,25 @@ def resolve_key(
     for path in file_candidates:
         value = read_key_file(path)
         if value:
-            return KeyResolution(value, "file", str(path))
+            return _accept(value, "file", str(path))
 
     command = (os.getenv(KEY_CMD_ENV) or "").strip()
     if command:
         value = read_key_command(command)
         if value:
-            return KeyResolution(value, "command", KEY_CMD_ENV)
+            return _accept(value, "command", KEY_CMD_ENV)
 
     if use_env_files:
         candidates = [Path(env_file).expanduser()] if env_file else candidate_env_files(cwd)
         for path in candidates:
             value = read_env_file(path)
             if value:
-                return KeyResolution(value, "dotenv", str(path))
+                return _accept(value, "dotenv", str(path))
 
     for secret in SECRET_PATHS:
         value = read_key_file(Path(secret))
         if value:
-            return KeyResolution(value, "secret", secret)
+            return _accept(value, "secret", secret)
 
     raise ConfigError(_missing_key_message(cwd, env_file, use_env_files))
 
@@ -225,8 +236,10 @@ def _missing_key_message(
     cwd: Optional[Path], env_file: Optional[Path], use_env_files: bool
 ) -> str:
     lines = [
-        f"No DeepSeek API key found. Set {ENV_VAR}, or run 'deepseek-web key set' "
-        "to store one from stdin in ./.env (mode 0600).",
+        f"No DeepSeek API key found. Set {ENV_VAR} in the environment.",
+        f"Alternatives: {KEY_FILE_ENV} (a file holding only the key) or "
+        f"{KEY_CMD_ENV} (a command whose stdout is the key).",
+        "This tool never stores or writes a key; provisioning is the user's job.",
         "Then verify with: deepseek-web doctor",
     ]
     if use_env_files:
@@ -235,110 +248,38 @@ def _missing_key_message(
         lines.append(
             "Checked .env files: " + (", ".join(existing) if existing else "none found")
         )
-    lines.append(f"Other sources: {KEY_FILE_ENV}, {KEY_CMD_ENV}, {', '.join(SECRET_PATHS)}")
+    lines.append(f"Secret mounts checked: {', '.join(SECRET_PATHS)}")
     return "\n".join(lines)
 
 
-# -- writing -------------------------------------------------------------
+# -- sanity checks -------------------------------------------------------
+
+#: Wrapped secrets: ``enc2:...``, ``gpg:...``, ``sops:...`` and friends. A
+#: colon is required so an ordinary token that merely starts with these
+#: letters is not mistaken for a wrapper.
+ENCRYPTED_WRAPPER = re.compile(
+    r"^(?:enc\d*|encrypted|gpg|age|vault|sops|sealed|base64):", re.IGNORECASE
+)
 
 
-def write_env_file(path: Path, values: Dict[str, str], mode: int = 0o600) -> Path:
-    """Merge ``values`` into ``path`` atomically, preserving other entries."""
-    target = Path(path).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
+def looks_encrypted(value: str) -> bool:
+    """True when ``value`` is a wrapped secret rather than a plaintext key.
 
-    existing_lines: List[str] = []
-    if target.exists():
-        existing_lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-
-    pending = dict(values)
-    output: List[str] = []
-    for line in existing_lines:
-        match = _ASSIGNMENT.match(line.strip())
-        if match and match.group(1) in pending:
-            name = match.group(1)
-            output.append(f"{name}={_quote(pending.pop(name))}")
-        else:
-            output.append(line)
-    for name, value in pending.items():
-        output.append(f"{name}={_quote(value)}")
-
-    tmp = target.with_name(f"{target.name}.tmp")
-    tmp.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
-    try:
-        os.chmod(tmp, mode)
-    except OSError:
-        pass
-    os.replace(tmp, target)
-    return target
-
-
-def remove_env_key(path: Path, name: str = ENV_VAR) -> bool:
-    target = Path(path).expanduser()
-    if not target.exists():
-        return False
-    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-    kept = [
-        line
-        for line in lines
-        if not (
-            (match := _ASSIGNMENT.match(line.strip()))
-            and match.group(1) == name
-        )
-    ]
-    if len(kept) == len(lines):
-        return False
-    tmp = target.with_name(f"{target.name}.tmp")
-    tmp.write_text("\n".join(kept).rstrip() + "\n", encoding="utf-8")
-    try:
-        os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
-    os.replace(tmp, target)
-    return True
-
-
-def _quote(value: str) -> str:
-    if any(ch in value for ch in (" ", "#", "\t", '"', "'")):
-        return '"' + value.replace('"', '\\"') + '"'
-    return value
-
-
-# -- environment diagnostics --------------------------------------------
-
-
-def diagnose_zeroclaw(config_path: Optional[Path] = None) -> Dict[str, object]:
-    """Report whether ZeroClaw's own config holds a usable plaintext key.
-
-    ZeroClaw stores provider keys encrypted at rest (``enc2:``) and only
-    hands them to shells listed in ``[risk_profiles.*].shell_env_passthrough``.
-    An encrypted blob is not a credential, so this is worth surfacing.
+    Nothing is decrypted and no file is read: this is a prefix test on a
+    value the caller already has. It exists so a pasted ciphertext blob
+    fails with an explanation instead of a confusing 401 from the API.
     """
-    path = Path(
-        config_path or os.getenv("ZEROCLAW_CONFIG") or Path.home() / ".zeroclaw" / "config.toml"
-    )
-    report: Dict[str, object] = {"config": str(path), "exists": path.exists()}
-    if not path.exists():
-        return report
+    if not value:
+        return False
+    return ENCRYPTED_WRAPPER.match(value.strip()) is not None
 
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        report["error"] = str(exc)
-        return report
 
-    matches = re.findall(
-        r'^\[providers\.models\.deepseek\.[^\]]+\][^\[]*?^api_key\s*=\s*"([^"]*)"',
-        text,
-        flags=re.MULTILINE | re.DOTALL,
+def encrypted_key_message(value: str) -> str:
+    """Explain a wrapped secret without echoing any part of it."""
+    scheme = value.strip().split(":", 1)[0]
+    return (
+        f"The value found is wrapped secret data (prefix '{scheme}:'), not a plaintext API key. "
+        "Encrypted-at-rest values are decrypted by whichever tool owns them and "
+        f"cannot be used as a credential here. Supply the raw key via {ENV_VAR}, "
+        f"{KEY_FILE_ENV}, or {KEY_CMD_ENV}."
     )
-    report["provider_keys"] = len(matches)
-    report["encrypted"] = [bool(m.startswith("enc")) for m in matches]
-    if matches and all(m.startswith("enc") for m in matches):
-        report["note"] = (
-            "ZeroClaw holds only encrypted (enc2:) provider keys. They are decrypted "
-            "in-process for model calls and are not usable as a plaintext API key. "
-            "Export a platform key, or add DEEPSEEK_API_KEY to "
-            "[risk_profiles.<name>].shell_env_passthrough so this shell inherits it."
-        )
-    return report

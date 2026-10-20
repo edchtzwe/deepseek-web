@@ -61,29 +61,31 @@ source in this order:
 | # | Source | How |
 | :--- | :--- | :--- |
 | 1 | Environment | `DEEPSEEK_API_KEY` |
-| 2 | Key file | `--env-file PATH`, or `DEEPSEEK_API_KEY_FILE=/path/to/key` |
+| 2 | Key file | `DEEPSEEK_API_KEY_FILE=/path/to/key` — a bare key, or a file containing `DEEPSEEK_API_KEY=...` |
 | 3 | Command | `DEEPSEEK_API_KEY_CMD="pass show deepseek"` (stdout is the key) |
-| 4 | `.env` discovery | walking up from `cwd`, then `~/.config/deepseek-web/.env`, then `~/.env` |
-| 5 | Secret mount | `/run/secrets/deepseek_api_key` |
+| 4 | `.env` file | `--env-file PATH` or `DEEPSEEK_WEB_ENV_FILE`, else discovery: walking up from `cwd`, then `~/.config/deepseek-web/.env`, then `~/.env`. Must be `KEY=VALUE` format — a bare key here is not read |
+| 5 | Secret mount | `/run/secrets/deepseek_api_key`, `/run/secrets/DEEPSEEK_API_KEY`, `/run/secrets/deepseek-web` |
+
+`--no-env-file` skips source 4 entirely. A key file (2) and a `.env` (4) are not
+interchangeable: the key file may hold the raw key alone, the `.env` may not.
 
 Empty values count as missing. That matters in containers, where compose commonly declares
 `DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}` and an unset host variable arrives as `""`.
 
-**No .env to write by hand.** Provision once, from stdin, and the tool stores it at `./.env`
-with mode `0600`:
+**The tool never writes a key.** It only reads one — from the environment, a key file, a
+command, a `.env` you already have, or a secret mount. Provisioning is yours to do, wherever
+you normally keep credentials: a compose `environment:` block, your shell profile, `pass`,
+1Password, or your platform's own provider settings. There is no `key set` to run and nothing
+for this tool to leave behind on disk.
 
 ```bash
-echo "$KEY" | deepseek-web key set        # or: deepseek-web key set --value "$KEY"
-deepseek-web key status                   # where would the key come from?
-deepseek-web key clear                    # remove it again
+deepseek-web key status          # where would the key come from?
 ```
 
-`key set` merges into an existing `.env` instead of overwriting it, writes atomically, and
-chmods the file. `.env` is gitignored in this repo.
-
-> The 131-character `enc2:` value in a ZeroClaw `config.toml` is **ciphertext**, not a
-> credential. ZeroClaw decrypts it in-process for model calls; it is not reusable as an API key
-> and will always 401 if sent. `deepseek-web key status` detects this and says so.
+> Some runtimes store provider keys **encrypted at rest** (`enc2:`, `gpg:`, `sops:`, `age:`,
+> `vault:` ...). Those blobs are decrypted by whichever tool owns them and are not usable as a
+> credential here — sending one always gets a 401. `key status` flags it and a call exits `3`
+> instead of wasting a request.
 
 Optional environment overrides:
 
@@ -92,28 +94,39 @@ Optional environment overrides:
 | `DEEPSEEK_API_BASE` | `https://api.deepseek.com/v1/tools` | Point at a mirror or proxy |
 | `DEEPSEEK_TIMEOUT` | `30` | Per-request timeout, seconds |
 | `DEEPSEEK_RETRIES` | `2` | Retries on 429/5xx/timeout |
+| `DEEPSEEK_MAX_CHARS` | `8000` | Default `--max-chars` |
+| `DEEPSEEK_WEB_ENV_FILE` | none | A `.env` file to prefer over discovery |
 
 ### Containers: get the key in without a .env
 
 If the key is already in the container environment (compose `environment:` or `env_file:`),
-the remaining gap is usually that the agent runtime hands shells a filtered environment.
-ZeroClaw, for example, only forwards variables listed in
-`[risk_profiles.<name>].shell_env_passthrough`:
+the remaining gap is usually that the agent runtime hands its subprocesses a **filtered**
+environment. Many runtimes expose an allowlist for exactly this; others inherit the container
+environment untouched. Check with one command inside the agent's shell:
 
-```toml
-[risk_profiles.yolo]
-shell_env_passthrough = ["DEEPSEEK_API_KEY"]
+```bash
+deepseek-web doctor        # "ready: yes" means the key reached this process
 ```
 
-Then a plain `deepseek-web search "..."` works inside the agent with no file at all. If you
-prefer a file, mount the host `.env` read-only and point at it:
+If it does not, three routes that never involve hand-editing a config file:
 
-```yaml
-volumes:
-  - ./.env:/zeroclaw-data/.env:ro
-```
+1. **Allowlist the variable** in whatever the runtime calls its shell/exec environment policy.
+2. **Mount a file** read-only and point at it:
 
-Either way the user never edits a config by hand — the key arrives with the container.
+   ```yaml
+   volumes:
+     - ./.env:/app/.env:ro
+   environment:
+     - DEEPSEEK_API_KEY_FILE=/app/.env
+   ```
+
+3. **Read it from a secret manager** at call time:
+
+   ```bash
+   export DEEPSEEK_API_KEY_CMD="pass show deepseek"
+   ```
+
+Either way the user never writes a key into a config by hand — it arrives with the container.
 
 
 ## Commands
@@ -176,13 +189,14 @@ source), and readiness. Never touches the network, never prints the key.
 ### `key`
 
 ```bash
-deepseek-web key status          # resolution chain + zero-claw config diagnosis
-deepseek-web key set             # read key from stdin, write ./.env (0600)
-deepseek-web key clear           # remove it from ./.env
+deepseek-web key status          # resolution chain: which source wins, and why
 ```
 
-`key status` also lists the `.env` files it looked at and reports whether a ZeroClaw config
-holds only encrypted `enc2:` credentials.
+Read-only by design: there is no `key set` and no `key clear`. The tool reports where a key
+would come from; it never stores, moves or deletes one.
+
+`key status` also lists the `.env` files it looked at, and reports when the resolved value is
+a wrapped secret rather than a plaintext key.
 
 ### Common flags
 
@@ -192,6 +206,8 @@ holds only encrypted `enc2:` credentials.
 | `--raw` | Print the untouched API response — use this to verify field names |
 | `--unescape` | Strip markdown backslash-escapes from `summary` / `content` |
 | `--max-chars N` | Cap `summary` / `content` per field (default `8000`, `0` = unlimited) |
+| `--env-file PATH` | Read the key from this `.env` instead of discovering one |
+| `--no-env-file` | Skip `.env` discovery (env, key file and command only) |
 | `--api-base URL` | Override the endpoint |
 | `--timeout SECONDS` | Override the timeout |
 | `--retries N` | Override the retry count |
@@ -285,10 +301,12 @@ take the agent down.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t . -v
+python -m unittest discover -s tests -t .
 ```
 
-109 tests, no network, no key required. Everything HTTP is mocked.
+Same command CI runs. Stdlib only, like the package itself — there is no test dependency to
+install, so the suite runs on a bare Python. No network, no key required; everything HTTP is
+mocked.
 
 ## Status and limitations
 
