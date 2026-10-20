@@ -103,7 +103,7 @@ def parse_dotenv(text: str) -> Dict[str, str]:
     """Parse a minimal ``KEY=VALUE`` file. No interpolation, no surprises."""
     values: Dict[str, str] = {}
     for raw_line in text.splitlines():
-        line = raw_line.strip()
+        line = raw_line.lstrip()
         if not line or line.startswith("#"):
             continue
         match = _ASSIGNMENT.match(line)
@@ -147,8 +147,12 @@ def read_key_file(path: Path) -> Optional[str]:
     parsed = parse_dotenv(text)
     if ENV_VAR in parsed:
         return parsed[ENV_VAR].strip() or None
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return lines[0] if lines and not lines[0].startswith("#") else None
+    for raw_line in text.splitlines():
+        line = raw_line.lstrip()
+        if not line or line.startswith("#"):
+            continue
+        return line.strip()
+    return None
 
 
 def read_key_command(command: str) -> Optional[str]:

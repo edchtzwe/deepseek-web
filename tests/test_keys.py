@@ -19,6 +19,7 @@ from deepseek_web.keys import (
     looks_encrypted,
     parse_dotenv,
     read_env_file,
+    read_key_file,
     remove_env_key,
     resolve_key,
     write_env_file,
@@ -52,6 +53,36 @@ class ParseDotenvTests(unittest.TestCase):
     def test_ignores_malformed_lines(self):
         parsed = parse_dotenv("not an assignment\n=novalue\nOK=1\n")
         self.assertEqual(parsed, {"OK": "1"})
+
+
+class ReadKeyFileTests(unittest.TestCase):
+    """A bare key file is read by skipping comments, not by rejecting them."""
+
+    def _keyfile(self, text: str) -> "Path":
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".key", delete=False)
+        tmp.write(text)
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        return Path(tmp.name)
+
+    def test_leading_comment_does_not_hide_the_key(self):
+        path = self._keyfile("# my deepseek key\nsk-live\n")
+        self.assertEqual(read_key_file(path), "sk-live")
+
+    def test_comment_block_then_key(self):
+        path = self._keyfile("\n# note\n# another note\n\n  sk-live  \n")
+        self.assertEqual(read_key_file(path), "sk-live")
+
+    def test_commented_candidate_is_never_returned(self):
+        path = self._keyfile("#DEEPSEEK_API_KEY=sk-commented\n")
+        self.assertIsNone(read_key_file(path))
+
+    def test_env_style_line_still_wins(self):
+        path = self._keyfile("# leading\nDEEPSEEK_API_KEY=sk-eq\n")
+        self.assertEqual(read_key_file(path), "sk-eq")
+
+    def test_empty_file_is_none(self):
+        self.assertIsNone(read_key_file(self._keyfile("")))
 
 
 class CandidateEnvFileTests(unittest.TestCase):
