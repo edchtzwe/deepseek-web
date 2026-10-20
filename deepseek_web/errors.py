@@ -17,6 +17,10 @@ class ConfigError(DeepSeekError):
     """Bad or missing local configuration (API key, base URL, timeout)."""
 
 
+class EncryptedKeyError(ConfigError):
+    """The resolved value is an encrypted blob, not a usable plaintext key."""
+
+
 class ValidationError(DeepSeekError):
     """Caller supplied an argument the API would reject."""
 

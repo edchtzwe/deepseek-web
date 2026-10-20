@@ -27,11 +27,19 @@ from .client import (
     Client,
     resolve_api_base,
 )
-from .errors import APIError, ConfigError, DeepSeekError, NetworkError, ValidationError
+from .errors import (
+    APIError,
+    ConfigError,
+    DeepSeekError,
+    EncryptedKeyError,
+    NetworkError,
+    ValidationError,
+)
 from .keys import (
     ENV_VAR,
     candidate_env_files,
-    diagnose_zeroclaw,
+    encrypted_key_message,
+    looks_encrypted,
     resolve_key,
     write_env_file,
     remove_env_key,
@@ -50,6 +58,7 @@ EXIT_NETWORK = 5
 EXIT_CODES = {
     ValidationError: EXIT_USAGE,
     ConfigError: EXIT_CONFIG,
+    EncryptedKeyError: EXIT_CONFIG,
     APIError: EXIT_API,
     NetworkError: EXIT_NETWORK,
 }
@@ -353,6 +362,7 @@ def run_doctor(args: argparse.Namespace) -> int:
 
 
 def run_key_status(args: argparse.Namespace) -> int:
+    encrypted = False
     try:
         resolution = resolve_key(
             env_file=args.env_file, use_env_files=not args.no_env_file
@@ -363,15 +373,27 @@ def run_key_status(args: argparse.Namespace) -> int:
             "api_key_hint": resolution.masked,
             "source": resolution.describe(),
         }
+    except EncryptedKeyError as exc:
+        encrypted = True
+        status = {
+            "ready": False,
+            "api_key_set": False,
+            "api_key_hint": None,
+            "source": None,
+            "api_key_encrypted": True,
+            "error": str(exc),
+        }
     except ConfigError as exc:
         status = {
             "ready": False,
             "api_key_set": False,
             "api_key_hint": None,
             "source": None,
+            "api_key_encrypted": False,
             "error": str(exc),
         }
 
+    status.setdefault("api_key_encrypted", False)
     status["env_files"] = [
         {"path": str(path), "exists": path.exists()}
         for path in (
@@ -380,7 +402,6 @@ def run_key_status(args: argparse.Namespace) -> int:
             else candidate_env_files()
         )
     ]
-    status["zeroclaw"] = diagnose_zeroclaw()
 
     if args.format == "json":
         print(json.dumps(status, indent=2, ensure_ascii=False))
@@ -388,13 +409,14 @@ def run_key_status(args: argparse.Namespace) -> int:
         if status["api_key_set"]:
             source = status["source"]
             print(f"key: {status['api_key_hint']} from {source['source']} ({source['origin']})")
+        elif encrypted:
+            print("key: wrapped secret (unusable)")
         else:
             print("key: missing")
         for entry in status["env_files"]:
             print(f"  .env {entry['path']} {'[present]' if entry['exists'] else ''}".rstrip())
-        note = status["zeroclaw"].get("note")
-        if note:
-            print(f"  note: {note}")
+        if encrypted:
+            print(f"  note: {status['error']}")
     return EXIT_OK
 
 
@@ -418,6 +440,8 @@ def run_key_set(args: argparse.Namespace) -> int:
         raise ValidationError("refusing to store an empty key")
     if any(ch.isspace() for ch in value):
         raise ValidationError("API key must not contain whitespace")
+    if looks_encrypted(value):
+        raise ValidationError(encrypted_key_message(value))
 
     target = Path(args.path).expanduser() if args.path else Path.cwd() / ".env"
     written = write_env_file(target, {ENV_VAR: value})

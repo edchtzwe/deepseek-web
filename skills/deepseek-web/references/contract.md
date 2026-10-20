@@ -69,7 +69,7 @@ rather than markdown. Fenced code blocks and Windows paths are preserved.
 | `type` | Exit | Cause |
 | :--- | :--- | :--- |
 | `usage_error` | 2 | Bad query, URL, count, or flag |
-| `config_error` | 3 | No usable API key, or a malformed override |
+| `config_error` | 3 | No usable API key, a wrapped secret instead of a key, or a malformed override |
 | `api_error` | 4 | Upstream 4xx/5xx; `status_code` is set |
 | `network_error` | 5 | Timeout, DNS, connection reset |
 | `unexpected` | 1 | Bug or unhandled exception |
@@ -95,8 +95,10 @@ First non-empty source wins. An empty string counts as missing, which is why a c
 4. `.env` found walking up from `cwd`, then `~/.config/deepseek-web/.env`, then `~/.env`
 5. `/run/secrets/deepseek_api_key`
 
-A 131-character `enc2:` value copied out of a ZeroClaw `config.toml` is ciphertext, not a
-credential. It will always 401. `deepseek-web key status` detects and reports this.
+A wrapped secret (`enc2:...`, `gpg:...`, `sops:...`, `age:...`, `vault:...`) is ciphertext, not a
+credential — sending one always returns 401. Resolution refuses it with exit `3` before any
+request is made; `key status` reports `"api_key_encrypted": true` and explains it. Nothing is
+ever decrypted: the check is a prefix test on the value that was found.
 
 ## Environment overrides
 

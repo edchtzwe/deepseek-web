@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .errors import ConfigError
+from .errors import ConfigError, EncryptedKeyError
 
 ENV_VAR = "DEEPSEEK_API_KEY"
 KEY_FILE_ENV = "DEEPSEEK_API_KEY_FILE"
@@ -175,6 +175,13 @@ def read_key_command(command: str) -> Optional[str]:
     return None
 
 
+def _accept(value: str, source: str, origin: str) -> KeyResolution:
+    """Build a resolution, refusing wrapped secrets before they are sent."""
+    if looks_encrypted(value):
+        raise EncryptedKeyError(encrypted_key_message(value))
+    return KeyResolution(value, source, origin)
+
+
 def resolve_key(
     explicit: Optional[str] = None,
     key_file: Optional[Path] = None,
@@ -184,11 +191,11 @@ def resolve_key(
 ) -> KeyResolution:
     """Find a key or raise :class:`ConfigError` with the searched paths."""
     if explicit and explicit.strip():
-        return KeyResolution(explicit.strip(), "argument", "api_key")
+        return _accept(explicit.strip(), "argument", "api_key")
 
     env_value = (os.getenv(ENV_VAR) or "").strip()
     if env_value:
-        return KeyResolution(env_value, "env", ENV_VAR)
+        return _accept(env_value, "env", ENV_VAR)
 
     file_candidates: List[Path] = []
     if key_file is not None:
@@ -198,25 +205,25 @@ def resolve_key(
     for path in file_candidates:
         value = read_key_file(path)
         if value:
-            return KeyResolution(value, "file", str(path))
+            return _accept(value, "file", str(path))
 
     command = (os.getenv(KEY_CMD_ENV) or "").strip()
     if command:
         value = read_key_command(command)
         if value:
-            return KeyResolution(value, "command", KEY_CMD_ENV)
+            return _accept(value, "command", KEY_CMD_ENV)
 
     if use_env_files:
         candidates = [Path(env_file).expanduser()] if env_file else candidate_env_files(cwd)
         for path in candidates:
             value = read_env_file(path)
             if value:
-                return KeyResolution(value, "dotenv", str(path))
+                return _accept(value, "dotenv", str(path))
 
     for secret in SECRET_PATHS:
         value = read_key_file(Path(secret))
         if value:
-            return KeyResolution(value, "secret", secret)
+            return _accept(value, "secret", secret)
 
     raise ConfigError(_missing_key_message(cwd, env_file, use_env_files))
 
@@ -304,41 +311,34 @@ def _quote(value: str) -> str:
     return value
 
 
-# -- environment diagnostics --------------------------------------------
+# -- sanity checks -------------------------------------------------------
+
+#: Wrapped secrets: ``enc2:...``, ``gpg:...``, ``sops:...`` and friends. A
+#: colon is required so an ordinary token that merely starts with these
+#: letters is not mistaken for a wrapper.
+ENCRYPTED_WRAPPER = re.compile(
+    r"^(?:enc\d*|encrypted|gpg|age|vault|sops|sealed|base64):", re.IGNORECASE
+)
 
 
-def diagnose_zeroclaw(config_path: Optional[Path] = None) -> Dict[str, object]:
-    """Report whether ZeroClaw's own config holds a usable plaintext key.
+def looks_encrypted(value: str) -> bool:
+    """True when ``value`` is a wrapped secret rather than a plaintext key.
 
-    ZeroClaw stores provider keys encrypted at rest (``enc2:``) and only
-    hands them to shells listed in ``[risk_profiles.*].shell_env_passthrough``.
-    An encrypted blob is not a credential, so this is worth surfacing.
+    Nothing is decrypted and no file is read: this is a prefix test on a
+    value the caller already has. It exists so a pasted ciphertext blob
+    fails with an explanation instead of a confusing 401 from the API.
     """
-    path = Path(
-        config_path or os.getenv("ZEROCLAW_CONFIG") or Path.home() / ".zeroclaw" / "config.toml"
-    )
-    report: Dict[str, object] = {"config": str(path), "exists": path.exists()}
-    if not path.exists():
-        return report
+    if not value:
+        return False
+    return ENCRYPTED_WRAPPER.match(value.strip()) is not None
 
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        report["error"] = str(exc)
-        return report
 
-    matches = re.findall(
-        r'^\[providers\.models\.deepseek\.[^\]]+\][^\[]*?^api_key\s*=\s*"([^"]*)"',
-        text,
-        flags=re.MULTILINE | re.DOTALL,
+def encrypted_key_message(value: str) -> str:
+    """Explain a wrapped secret without echoing any part of it."""
+    scheme = value.strip().split(":", 1)[0]
+    return (
+        f"The value found is wrapped secret data (prefix '{scheme}:'), not a plaintext API key. "
+        "Encrypted-at-rest values are decrypted by whichever tool owns them and "
+        f"cannot be used as a credential here. Supply the raw key via {ENV_VAR}, "
+        f"'deepseek-web key set', {KEY_FILE_ENV}, or {KEY_CMD_ENV}."
     )
-    report["provider_keys"] = len(matches)
-    report["encrypted"] = [bool(m.startswith("enc")) for m in matches]
-    if matches and all(m.startswith("enc") for m in matches):
-        report["note"] = (
-            "ZeroClaw holds only encrypted (enc2:) provider keys. They are decrypted "
-            "in-process for model calls and are not usable as a plaintext API key. "
-            "Export a platform key, or add DEEPSEEK_API_KEY to "
-            "[risk_profiles.<name>].shell_env_passthrough so this shell inherits it."
-        )
-    return report

@@ -81,9 +81,10 @@ deepseek-web key clear                    # remove it again
 `key set` merges into an existing `.env` instead of overwriting it, writes atomically, and
 chmods the file. `.env` is gitignored in this repo.
 
-> The 131-character `enc2:` value in a ZeroClaw `config.toml` is **ciphertext**, not a
-> credential. ZeroClaw decrypts it in-process for model calls; it is not reusable as an API key
-> and will always 401 if sent. `deepseek-web key status` detects this and says so.
+> Some runtimes store provider keys **encrypted at rest** (`enc2:`, `gpg:`, `sops:`, `age:`,
+> `vault:` ...). Those blobs are decrypted by whichever tool owns them and are not usable as a
+> credential here — sending one always gets a 401. The tool refuses them up front: `key status`
+> flags it, `key set` rejects it, and a call exits `3` instead of wasting a request.
 
 Optional environment overrides:
 
@@ -96,24 +97,33 @@ Optional environment overrides:
 ### Containers: get the key in without a .env
 
 If the key is already in the container environment (compose `environment:` or `env_file:`),
-the remaining gap is usually that the agent runtime hands shells a filtered environment.
-ZeroClaw, for example, only forwards variables listed in
-`[risk_profiles.<name>].shell_env_passthrough`:
+the remaining gap is usually that the agent runtime hands its subprocesses a **filtered**
+environment. Many runtimes expose an allowlist for exactly this; others inherit the container
+environment untouched. Check with one command inside the agent's shell:
 
-```toml
-[risk_profiles.yolo]
-shell_env_passthrough = ["DEEPSEEK_API_KEY"]
+```bash
+deepseek-web doctor        # "ready: yes" means the key reached this process
 ```
 
-Then a plain `deepseek-web search "..."` works inside the agent with no file at all. If you
-prefer a file, mount the host `.env` read-only and point at it:
+If it does not, three routes that never involve hand-editing a config file:
 
-```yaml
-volumes:
-  - ./.env:/zeroclaw-data/.env:ro
-```
+1. **Allowlist the variable** in whatever the runtime calls its shell/exec environment policy.
+2. **Mount a file** read-only and point at it:
 
-Either way the user never edits a config by hand — the key arrives with the container.
+   ```yaml
+   volumes:
+     - ./.env:/app/.env:ro
+   environment:
+     - DEEPSEEK_API_KEY_FILE=/app/.env
+   ```
+
+3. **Read it from a secret manager** at call time:
+
+   ```bash
+   export DEEPSEEK_API_KEY_CMD="pass show deepseek"
+   ```
+
+Either way the user never writes a key into a config by hand — it arrives with the container.
 
 
 ## Commands
@@ -181,8 +191,8 @@ deepseek-web key set             # read key from stdin, write ./.env (0600)
 deepseek-web key clear           # remove it from ./.env
 ```
 
-`key status` also lists the `.env` files it looked at and reports whether a ZeroClaw config
-holds only encrypted `enc2:` credentials.
+`key status` also lists the `.env` files it looked at, and reports when the resolved value is
+a wrapped secret rather than a plaintext key.
 
 ### Common flags
 

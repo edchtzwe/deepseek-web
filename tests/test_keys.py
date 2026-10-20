@@ -12,11 +12,11 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from deepseek_web import keys
-from deepseek_web.errors import ConfigError
+from deepseek_web.errors import ConfigError, EncryptedKeyError
 from deepseek_web.keys import (
     ENV_VAR,
     candidate_env_files,
-    diagnose_zeroclaw,
+    looks_encrypted,
     parse_dotenv,
     read_env_file,
     remove_env_key,
@@ -193,32 +193,64 @@ class EnvFileWriteTests(unittest.TestCase):
         self.assertIsNone(read_env_file(self.path))
 
 
-class ZeroclawDiagnosisTests(unittest.TestCase):
-    def test_detects_encrypted_provider_key(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            config = Path(tmp) / "config.toml"
-            config.write_text(
-                '[providers.models.deepseek.flash]\n'
-                'api_key = "enc2:AAAABBBBCCCC"\n'
-                'model = "deepseek-flash"\n'
-            )
-            report = diagnose_zeroclaw(config)
-        self.assertTrue(report["exists"])
-        self.assertEqual(report["provider_keys"], 1)
-        self.assertEqual(report["encrypted"], [True])
-        self.assertIn("shell_env_passthrough", report["note"])
+class LooksEncryptedTests(unittest.TestCase):
+    """Wrapped secrets are refused before they can burn a request on a 401."""
 
-    def test_detects_plaintext_key(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            config = Path(tmp) / "config.toml"
-            config.write_text('[providers.models.deepseek.flash]\napi_key = "sk-plain"\n')
-            report = diagnose_zeroclaw(config)
-        self.assertEqual(report["encrypted"], [False])
-        self.assertNotIn("note", report)
+    def test_recognises_common_wrappers(self):
+        for value in (
+            "enc2:AAAABBBBCCCCDDDD",
+            "enc:abc",
+            "encrypted:abc",
+            "gpg:hQEMA1234",
+            "age:YWdlLWVuY3J5cHRpb24=",
+            "vault:v1:abc",
+            "sops:abc",
+            "sealed:abc",
+            "base64:c2stZmFrZQ==",
+            "ENC2:UPPER",
+        ):
+            self.assertTrue(looks_encrypted(value), value)
 
-    def test_missing_config_is_not_an_error(self):
-        report = diagnose_zeroclaw(Path("/nonexistent/config.toml"))
-        self.assertFalse(report["exists"])
+    def test_accepts_real_key_shapes(self):
+        for value in (
+            "sk-fc51aa00bb11cc22dd33ee44ff556dd2",
+            "sk-proj-abc123",
+            "plain-token",
+            "eyJhbGciOiJIUzI1NiJ9.payload.sig",
+        ):
+            self.assertFalse(looks_encrypted(value), value)
+
+    def test_empty_is_not_encrypted(self):
+        self.assertFalse(looks_encrypted(""))
+
+    def test_message_never_contains_the_value(self):
+        secret = "enc2:SUPERSECRETBLOB"
+        message = keys.encrypted_key_message(secret)
+        self.assertIn("enc2:", message)
+        self.assertNotIn("SUPERSECRETBLOB", message)
+
+    def test_resolve_refuses_env_wrapped_secret(self):
+        env = {ENV_VAR: "enc2:AAAABBBB"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch(
+            "deepseek_web.keys.SECRET_PATHS", ()
+        ):
+            with self.assertRaises(EncryptedKeyError):
+                resolve_key(use_env_files=False)
+
+    def test_resolve_refuses_dotenv_wrapped_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text(f"{ENV_VAR}=enc2:AAAABBBB\n")
+            with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
+                "deepseek_web.keys.SECRET_PATHS", ()
+            ):
+                with self.assertRaises(EncryptedKeyError):
+                    resolve_key(env_file=path)
+
+    def test_resolve_still_accepts_real_key(self):
+        with mock.patch.dict(os.environ, {ENV_VAR: "sk-abcdef123456"}, clear=True):
+            resolution = resolve_key(use_env_files=False)
+        self.assertEqual(resolution.source, "env")
 
 
 if __name__ == "__main__":
