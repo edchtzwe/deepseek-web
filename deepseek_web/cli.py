@@ -49,6 +49,10 @@ from .textproc import strip_markdown_escapes
 from .validation import DEFAULT_MAX_CHARS, truncate_text, validate_max_chars
 
 EXIT_OK = 0
+
+#: Printed on every successful `key set`. Written to a file that may well be
+#: inside a repo; keeping it out of version control is the user's call, not ours.
+ENV_FILE_NOTE = ".env holds a secret — keep it out of version control"
 EXIT_UNEXPECTED = 1
 EXIT_USAGE = 2
 EXIT_CONFIG = 3
@@ -450,14 +454,13 @@ def run_key_set(args: argparse.Namespace) -> int:
         "path": str(written),
         "mode": oct(written.stat().st_mode & 0o777),
         "api_key_hint": f"****{value[-4:]}" if len(value) >= 8 else "****",
-        "gitignored": _is_gitignored(written),
+        "note": ENV_FILE_NOTE,
     }
     if args.format == "json":
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print(f"stored key {payload['api_key_hint']} in {payload['path']} ({payload['mode']})")
-        if not payload["gitignored"]:
-            print("  warning: this path is not covered by .gitignore")
+        print(f"  note: {ENV_FILE_NOTE}")
     return EXIT_OK
 
 
@@ -470,24 +473,6 @@ def run_key_clear(args: argparse.Namespace) -> int:
     else:
         print(f"{'removed' if removed else 'no key found in'} {target}")
     return EXIT_OK
-
-
-def _is_gitignored(path: Path) -> bool:
-    """Cheap check: is this .env covered by a .gitignore in this or a parent dir?"""
-    name = path.name
-    for directory in [path.parent, *list(path.parent.parents)[:6]]:
-        ignore = directory / ".gitignore"
-        if not ignore.exists():
-            continue
-        try:
-            lines = ignore.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            entry = line.strip()
-            if entry in (name, f"{name}*", f"*.env", "*"):
-                return True
-    return False
 
 
 def run_key(args: argparse.Namespace) -> int:

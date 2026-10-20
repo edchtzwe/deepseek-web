@@ -13,6 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from deepseek_web import cli
 from deepseek_web.keys import ENV_VAR
 from tests.test_cli import run
 
@@ -43,6 +44,32 @@ class KeySetTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "0o600")
         self.assertIn("sk-abcdefgh1234", self.path.read_text())
         self.assertNotIn("sk-abcdefgh1234", out)
+
+    def test_set_always_reminds_about_version_control(self):
+        """The tool writes the file and says its piece; git hygiene is not its job."""
+        with mock.patch.dict(os.environ, CLEAN_ENV, clear=False):
+            code, out, _ = run(
+                ["key", "set", "--value", "sk-abcdefgh1234", "--path", str(self.path)]
+            )
+            _, text_out, _ = run(
+                ["key", "set", "--value", "sk-abcdefgh1234", "--path",
+                 str(self.path), "--format", "text"]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["note"], cli.ENV_FILE_NOTE)
+        self.assertIn(cli.ENV_FILE_NOTE, text_out)
+
+    def test_set_does_not_inspect_git_state(self):
+        """No .gitignore parsing, no git subprocess: writing a key is not a VCS query."""
+        self.assertFalse(hasattr(cli, "_is_gitignored"))
+        self.path.write_text("")
+        (Path(self.tmp.name) / ".gitignore").write_text("*\n")
+        with mock.patch.dict(os.environ, CLEAN_ENV, clear=False):
+            code, out, _ = run(
+                ["key", "set", "--value", "sk-abcdefgh1234", "--path", str(self.path)]
+            )
+        self.assertEqual(code, 0)
+        self.assertNotIn("gitignored", json.loads(out))
 
     def test_set_rejects_empty_value(self):
         with mock.patch.dict(os.environ, CLEAN_ENV, clear=False):

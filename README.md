@@ -78,8 +78,9 @@ deepseek-web key status                   # where would the key come from?
 deepseek-web key clear                    # remove it again
 ```
 
-`key set` merges into an existing `.env` instead of overwriting it, writes atomically, and
-chmods the file. `.env` is gitignored in this repo.
+`key set` merges into an existing `.env` instead of overwriting it, writes atomically, chmods
+the file, and reminds you to keep it out of version control. It does not inspect your
+repository — that judgement stays with you.
 
 > Some runtimes store provider keys **encrypted at rest** (`enc2:`, `gpg:`, `sops:`, `age:`,
 > `vault:` ...). Those blobs are decrypted by whichever tool owns them and are not usable as a
