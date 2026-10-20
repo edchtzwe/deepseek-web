@@ -301,10 +301,12 @@ take the agent down.
 ## Development
 
 ```bash
-python -m pytest tests/ -q
+python -m unittest discover -s tests -t .
 ```
 
-Same command CI runs. No network, no key required — everything HTTP is mocked.
+Same command CI runs. Stdlib only, like the package itself — there is no test dependency to
+install, so the suite runs on a bare Python. No network, no key required; everything HTTP is
+mocked.
 
 ## Status and limitations
 
